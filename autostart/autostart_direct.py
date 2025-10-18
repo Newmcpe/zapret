@@ -1,4 +1,3 @@
-# autostart_direct.py
 """
 Модуль для настройки автозапуска стратегий в Direct режиме.
 Запускает winws.exe напрямую через задачи планировщика.
@@ -13,6 +12,7 @@ from pathlib import Path
 from typing import Optional, Callable, Dict, List
 from log import log
 from utils import run_hidden
+from .registry_check import set_autostart_enabled
 
 # Имена для задач Direct режима
 DIRECT_TASK_NAME = "ZapretDirect"
@@ -39,10 +39,13 @@ def _resolve_file_paths(args: List[str], work_dir: str) -> List[str]:
                 filename = filename.strip('"')
                 
                 if not os.path.isabs(filename):
-                    # Используем папку WINDIVERT_FILTER для фильтров
-                    windivert_dir = os.path.dirname(WINDIVERT_FILTER) if os.path.isfile(WINDIVERT_FILTER) else WINDIVERT_FILTER
-                    full_path = os.path.join(windivert_dir, filename)
-                    # Для autostart не нужны кавычки - schtasks сам добавит при необходимости
+                    # WINDIVERT_FILTER - это путь к папке windivert.filter
+                    full_path = os.path.join(WINDIVERT_FILTER, filename)
+                    
+                    # Проверяем существование файла
+                    if not os.path.exists(full_path):
+                        log(f"Предупреждение: файл фильтра не найден: {full_path}", "WARNING")
+                    
                     resolved_args.append(f'--wf-raw=@{full_path}')
                 else:
                     resolved_args.append(f'--wf-raw=@{filename}')
@@ -59,19 +62,25 @@ def _resolve_file_paths(args: List[str], work_dir: str) -> List[str]:
             
             if not os.path.isabs(filename):
                 full_path = os.path.join(lists_dir, filename)
-                resolved_args.append(f'{prefix}={full_path}')  # Без кавычек - schtasks сам добавит
+                resolved_args.append(f'{prefix}={full_path}')
             else:
                 resolved_args.append(f'{prefix}={filename}')
         
         # Обработка bin файлов
         elif any(arg.startswith(prefix) for prefix in [
-            "--dpi-desync-fake-tls=", "--dpi-desync-fake-syndata=", 
-            "--dpi-desync-fake-quic=", "--dpi-desync-fake-unknown-udp=",
-            "--dpi-desync-split-seqovl-pattern="
+            "--dpi-desync-fake-tls=",
+            "--dpi-desync-fake-syndata=", 
+            "--dpi-desync-fake-quic=",
+            "--dpi-desync-fake-unknown-udp=",
+            "--dpi-desync-split-seqovl-pattern=",
+            "--dpi-desync-fake-http=",
+            "--dpi-desync-fake-unknown=",
+            "--dpi-desync-fakedsplit-pattern="
         ]):
             prefix, filename = arg.split("=", 1)
             
-            if filename.startswith("0x"):
+            # Проверяем специальные значения (hex или модификаторы)
+            if filename.startswith("0x") or filename.startswith("!"):
                 resolved_args.append(arg)
             else:
                 filename = filename.strip('"')
@@ -96,13 +105,11 @@ def _build_command_line(winws_exe: str, args: List[str], work_dir: str) -> str:
     # Применяем дополнительные параметры
     from strategy_menu.strategy_runner import (
         apply_game_filter_parameter,
-        apply_ipset_lists_parameter,
         apply_wssize_parameter
     )
     
     lists_dir = os.path.join(work_dir, "lists")
     resolved_args = apply_game_filter_parameter(resolved_args, lists_dir)
-    resolved_args = apply_ipset_lists_parameter(resolved_args, lists_dir)
     resolved_args = apply_wssize_parameter(resolved_args)
     
     # Экранируем аргументы для командной строки Windows
@@ -183,6 +190,8 @@ def setup_direct_autostart_task(
         
         if result.returncode == 0:
             log(f"Задача {DIRECT_TASK_NAME} создана", "✅ SUCCESS")
+            # Обновляем статус в реестре
+            set_autostart_enabled(True, "direct_task")
             return True
         else:
             error_msg = f"Ошибка создания задачи. Код: {result.returncode}\n{result.stderr}"
@@ -309,6 +318,9 @@ def setup_direct_autostart_service(
             
             log(f"Задача {DIRECT_BOOT_TASK_NAME} создана (запуск при загрузке)", "✅ SUCCESS")
             
+            # Обновляем статус в реестре
+            set_autostart_enabled(True, "direct_boot")
+            
             if ui_error_cb:
                 ui_error_cb(
                     "✅ Автозапуск настроен!\n\n"
@@ -351,13 +363,11 @@ def _create_task_with_bat_fallback(
         # Применяем параметры
         from strategy_menu.strategy_runner import (
             apply_game_filter_parameter,
-            apply_ipset_lists_parameter,
             apply_wssize_parameter
         )
         
         lists_dir = os.path.join(work_dir, "lists")
         resolved_args = apply_game_filter_parameter(resolved_args, lists_dir)
-        resolved_args = apply_ipset_lists_parameter(resolved_args, lists_dir)
         resolved_args = apply_wssize_parameter(resolved_args)
         
         # Создаем .bat содержимое
@@ -396,6 +406,9 @@ cd /d "{work_dir}"
         
         if result.returncode == 0:
             log(f"Задача {task_name} создана через .bat файл", "✅ SUCCESS")
+            # Обновляем статус в реестре
+            method = "direct_boot_bat" if "Boot" in task_name else "direct_task_bat"
+            set_autostart_enabled(True, method)
             return True
         else:
             log(f"Ошибка создания задачи: {result.stderr}", "❌ ERROR")
@@ -420,6 +433,11 @@ def remove_direct_autostart() -> bool:
     if _delete_task(DIRECT_BOOT_TASK_NAME):
         removed_any = True
     
+    # НОВОЕ: Удаляем службу Direct режима
+    from .autostart_direct_service import remove_direct_service
+    if remove_direct_service():
+        removed_any = True
+    
     # Удаляем .bat файлы
     for filename in ["zapret_autostart.bat", "zapret_direct.bat", "zapret_boot_task.xml"]:
         try:
@@ -436,12 +454,21 @@ def remove_direct_autostart() -> bool:
     if _delete_direct_strategy_config():
         removed_any = True
     
+    # Обновляем реестр если что-то удалили
+    if removed_any:
+        # Проверяем остались ли другие методы автозапуска
+        from .checker import CheckerManager
+        checker = CheckerManager(None)
+        if not checker.check_autostart_exists_full():
+            # Если ничего не осталось - отключаем в реестре
+            set_autostart_enabled(False)
+    
     return removed_any
 
 
 def check_direct_autostart_exists() -> bool:
     """
-    Проверяет наличие автозапуска Direct режима
+    Проверяет наличие автозапуска Direct режима (для полной проверки)
     """
     return _check_task_exists(DIRECT_TASK_NAME) or _check_task_exists(DIRECT_BOOT_TASK_NAME)
 
@@ -453,7 +480,7 @@ def collect_direct_strategy_args(app_instance) -> tuple[List[str], str, str]:
     Собирает аргументы для текущей Direct стратегии
     """
     try:
-        from config import get_direct_strategy_selections
+        from strategy_menu import get_direct_strategy_selections
         from strategy_menu.strategy_lists_separated import combine_strategies
         
         # Получаем путь к winws.exe
@@ -466,12 +493,7 @@ def collect_direct_strategy_args(app_instance) -> tuple[List[str], str, str]:
         selections = get_direct_strategy_selections()
         
         # Комбинируем стратегии
-        combined = combine_strategies(
-            selections.get('youtube'),
-            selections.get('discord'),
-            selections.get('discord_voice'),
-            selections.get('other')
-        )
+        combined = combine_strategies(**selections)
         
         # Парсим аргументы
         import shlex
@@ -519,7 +541,7 @@ def _save_direct_strategy_config(args: List[str], name: str, cmd_line: str):
             "cmd_line": cmd_line
         }
         
-        reg_path = r"SOFTWARE\ZapretGUI\DirectAutostart"
+        reg_path = r"Software\ZapretReg2GUI\DirectAutostart"
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, reg_path) as key:
             winreg.SetValueEx(key, "Config", 0, winreg.REG_SZ, json.dumps(config))
         
@@ -532,7 +554,7 @@ def _delete_direct_strategy_config() -> bool:
     """Удаляет конфигурацию из реестра"""
     try:
         import winreg
-        reg_path = r"SOFTWARE\ZapretGUI"
+        reg_path = r"Software\ZapretReg2GUI"
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_path, 0, winreg.KEY_WRITE) as key:
             winreg.DeleteKey(key, "DirectAutostart")
         log("Конфигурация удалена", "DEBUG")
