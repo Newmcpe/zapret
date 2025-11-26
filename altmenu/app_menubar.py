@@ -17,6 +17,7 @@ from utils import run_hidden
 from log import log, LogViewerDialog, global_logger
 
 from startup import get_remove_windows_terminal, set_remove_windows_terminal
+from discord.discord_restart import get_discord_restart_setting, toggle_discord_restart
 
 class LogReportDialog(QDialog):
     """Диалог для ввода описания проблемы и контактов при отправке лога"""
@@ -113,7 +114,6 @@ class AppMenuBar(QMenuBar):
 
         # Чек-бокс автоперезапуска Discord
         self.auto_discord_restart_act = QAction("Автоперезапуск Discord", self, checkable=True)
-        from discord.discord_restart import get_discord_restart_setting
         self.auto_discord_restart_act.setChecked(get_discord_restart_setting())
         self.auto_discord_restart_act.toggled.connect(self.toggle_discord_restart)
         file_menu.addAction(self.auto_discord_restart_act)
@@ -308,8 +308,6 @@ class AppMenuBar(QMenuBar):
         """
         Переключает автоматический перезапуск Discord при смене стратегии.
         """
-        from discord.discord_restart import toggle_discord_restart
-        
         # Блокируем сигналы чтобы избежать рекурсии при изменении состояния
         self.auto_discord_restart_act.blockSignals(True)
         
