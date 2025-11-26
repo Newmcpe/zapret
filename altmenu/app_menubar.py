@@ -111,6 +111,13 @@ class AppMenuBar(QMenuBar):
         self.auto_dpi_act.toggled.connect(self.toggle_dpi_autostart)
         file_menu.addAction(self.auto_dpi_act)
 
+        # Чек-бокс автоперезапуска Discord
+        self.auto_discord_restart_act = QAction("Автоперезапуск Discord", self, checkable=True)
+        from discord.discord_restart import get_discord_restart_setting
+        self.auto_discord_restart_act.setChecked(get_discord_restart_setting())
+        self.auto_discord_restart_act.toggled.connect(self.toggle_discord_restart)
+        file_menu.addAction(self.auto_discord_restart_act)
+
         self.clear_cache = file_menu.addAction("Сбросить программу")
         self.clear_cache.triggered.connect(self.clear_startup_cache)
 
@@ -296,6 +303,28 @@ class AppMenuBar(QMenuBar):
             QMessageBox.warning(self._pw, "Предупреждение", warning_msg)
         else:
             QMessageBox.information(self._pw, "Удаление Windows Terminal", msg)
+
+    def toggle_discord_restart(self, enabled: bool):
+        """
+        Переключает автоматический перезапуск Discord при смене стратегии.
+        """
+        from discord.discord_restart import toggle_discord_restart
+        
+        # Блокируем сигналы чтобы избежать рекурсии при изменении состояния
+        self.auto_discord_restart_act.blockSignals(True)
+        
+        # Вызываем функцию переключения, которая покажет диалоги
+        success = toggle_discord_restart(
+            parent=self._pw,
+            status_callback=self._set_status
+        )
+        
+        # Если пользователь отменил действие, возвращаем предыдущее состояние
+        if not success:
+            self.auto_discord_restart_act.setChecked(not enabled)
+        
+        # Разблокируем сигналы
+        self.auto_discord_restart_act.blockSignals(False)
 
     def toggle_dpi_autostart(self, enabled: bool):
         set_dpi_autostart(enabled)
